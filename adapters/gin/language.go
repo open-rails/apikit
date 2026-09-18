@@ -1,5 +1,4 @@
-// Package middleware provides Gin middleware for common API concerns.
-package middleware
+package apikitgin
 
 import (
 	"net/http"
@@ -204,7 +203,6 @@ func GetLanguage(c *gin.Context) string {
 
 	return "en"
 }
-
 
 // BuildSupportedMap creates a map of supported languages for fast lookup.
 // Useful for redirect middleware that needs to check language validity.
