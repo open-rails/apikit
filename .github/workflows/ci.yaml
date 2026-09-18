@@ -1,0 +1,59 @@
+name: ci
+
+on:
+  push:
+    branches: ['**']
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    name: Build, vet and test
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: gofmt
+        run: test -z "$(gofmt -l . adapters/gin)"
+      - name: Build
+        run: go build ./... && go build ./adapters/gin/...
+      - name: Vet
+        run: go vet ./... && go vet ./adapters/gin/...
+      - name: Test
+        run: go test -race ./... ./adapters/gin/...
+
+  # The root module is what every library imports; a framework dependency
+  # reaching it is a defect, not a preference.
+  root-is-framework-free:
+    name: Root module has no dependencies
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - name: go.mod declares no requires
+        run: |
+          if grep -qE '^\s*require' go.mod; then
+            echo "root go.mod must stay dependency-free:" && grep -nE '^\s*require' go.mod && exit 1
+          fi
+      - name: No non-stdlib imports
+        run: |
+          deps=$(GOWORK=off go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... \
+                 | grep -v '^github.com/open-rails/apikit' || true)
+          if [ -n "$deps" ]; then echo "non-stdlib dependency reached the root module:" && echo "$deps" && exit 1; fi
