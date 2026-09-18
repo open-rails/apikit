@@ -91,8 +91,8 @@ check_tree_adapter_builds() {
   local dir
   dir=$(mktemp -d)
   trap 'rm -rf "$dir"' RETURN
-  cp -r "$ROOT/." "$dir/tree"
-  rm -f "$dir/tree/go.work" "$dir/tree/go.work.sum"
+  mkdir -p "$dir/tree"
+  tar -C "$ROOT" --exclude=.git --exclude=go.work --exclude=go.work.sum -cf - . | tar -C "$dir/tree" -xf -
   (cd "$dir/tree/$ADAPTER" && GOWORK=off go mod edit -replace "$MODULE=../.." &&
     GOWORK=off go build ./... && GOWORK=off go test ./... >/dev/null) ||
     { echo "the in-tree adapter does not build against the in-tree root" >&2; return 1; }
