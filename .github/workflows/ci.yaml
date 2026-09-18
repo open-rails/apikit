@@ -26,7 +26,7 @@ jobs:
         with:
           go-version: '1.24'
       - name: gofmt
-        run: test -z "$(gofmt -l . adapters/gin)"
+        run: test -z "$(gofmt -l . adapters/gin compat)"
       - name: Build
         run: go build ./... && go build ./adapters/gin/...
       - name: Vet
@@ -57,3 +57,44 @@ jobs:
           deps=$(GOWORK=off go list -deps -f '{{if not .Standard}}{{.ImportPath}}{{end}}' ./... \
                  | grep -v '^github.com/open-rails/apikit' || true)
           if [ -n "$deps" ]; then echo "non-stdlib dependency reached the root module:" && echo "$deps" && exit 1; fi
+
+  # adapters/gin v0.1.0 shipped requiring a root version that did not exist:
+  # inside go.work it resolved from the tree, so nothing here noticed. This job
+  # leaves the workspace and the module cache, which is what a consumer does.
+  adapter-module-independent:
+    name: Adapter resolves outside the workspace
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          fetch-depth: 0 # the published-adapter check reads tags
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.24'
+      - run: ./scripts/check-adapter-module.sh --selftest
+
+  # The compatibility evidence. It is a separate module on a newer Go because it
+  # depends on the deployed authkit/openrails/ginapi, and it is the gate for any
+  # wire change: the fixtures must still describe reality.
+  compat-fixtures:
+    name: Compatibility fixtures
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    env:
+      GOWORK: off
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+      - uses: actions/setup-go@v5
+        with:
+          go-version: '1.26'
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24'
+      - name: Writer fixtures are still the real bytes
+        run: cd compat && go test ./... -count=1
+      - name: The consumers' own parsers still behave as recorded
+        run: cd compat/spa && node probe.mjs

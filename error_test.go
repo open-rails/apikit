@@ -40,69 +40,88 @@ func TestWriteErrorWire(t *testing.T) {
 			name:   "invalid request keeps message and param",
 			err:    apikit.E(http.StatusBadRequest, apikit.CodeMissingParam, "slug is required").WithParam("slug"),
 			status: 400,
-			body:   `{"object":"error","error":{"type":"invalid_request_error","code":"missing_param","message":"slug is required","param":"slug"}}`,
+			body:   `{"error":{"type":"invalid_request_error","code":"missing_param","message":"slug is required","param":"slug"}}`,
 		},
 		{
-			name:   "not found is its own category",
+			name:   "404 stays invalid_request_error, as authkit and openrails deploy it",
 			err:    apikit.E(http.StatusNotFound, apikit.CodeResourceNotFound, "gallery not found"),
 			status: 404,
-			body:   `{"object":"error","error":{"type":"not_found_error","code":"resource_not_found","message":"gallery not found"}}`,
+			body:   `{"error":{"type":"invalid_request_error","code":"resource_not_found","message":"gallery not found"}}`,
 		},
 		{
-			name:   "conflict is its own category",
+			name:   "409 stays invalid_request_error; the conflict is in the code",
 			err:    apikit.E(http.StatusConflict, apikit.CodeResourceConflict, "slug already taken"),
 			status: 409,
-			body:   `{"object":"error","error":{"type":"conflict_error","code":"resource_conflict","message":"slug already taken"}}`,
+			body:   `{"error":{"type":"invalid_request_error","code":"resource_conflict","message":"slug already taken"}}`,
 		},
 		{
-			name:   "rejected is explicit, never inferred from 422",
-			err:    apikit.E(http.StatusUnprocessableEntity, apikit.CodeContentRejected, "sexualised minor").WithType(apikit.TypeRejected),
+			name:   "moderation 422 is the existing transport type plus a stable code",
+			err:    apikit.E(http.StatusUnprocessableEntity, apikit.CodeModerationRejected, "the artwork was refused"),
 			status: 422,
-			body:   `{"object":"error","error":{"type":"rejected_error","code":"content_rejected","message":"sexualised minor"}}`,
+			body:   `{"error":{"type":"invalid_request_error","code":"moderation_rejected","message":"the artwork was refused"}}`,
 		},
 		{
-			name:   "422 without an explicit type stays invalid_request",
+			name:   "422 without a moderation code is an ordinary invalid request",
 			err:    apikit.E(http.StatusUnprocessableEntity, apikit.CodeInvalidParam, "cannot publish an empty chapter"),
 			status: 422,
-			body:   `{"object":"error","error":{"type":"invalid_request_error","code":"invalid_param","message":"cannot publish an empty chapter"}}`,
+			body:   `{"error":{"type":"invalid_request_error","code":"invalid_param","message":"cannot publish an empty chapter"}}`,
 		},
 		{
-			name:   "unconfigured capability is 501, not a crash",
+			name:   "501 is api_error plus not_implemented, not a new transport type",
+			err:    apikit.E(http.StatusNotImplemented, apikit.CodeNotImplemented, "video transcoding is not built into this deployment"),
+			status: 501,
+			body:   `{"error":{"type":"api_error","code":"not_implemented","message":"video transcoding is not built into this deployment"}}`,
+		},
+		{
+			name:   "an unconfigured capability is 501 with its own code",
 			err:    apikit.E(http.StatusNotImplemented, apikit.CodeNotConfigured, "no MediaStore configured"),
 			status: 501,
-			body:   `{"object":"error","error":{"type":"not_implemented_error","code":"not_configured","message":"no MediaStore configured"}}`,
+			body:   `{"error":{"type":"api_error","code":"not_configured","message":"no MediaStore configured"}}`,
 		},
 		{
 			name:   "503 keeps its operational message",
 			err:    apikit.E(http.StatusServiceUnavailable, apikit.CodeServiceUnavailable, "search is unavailable"),
 			status: 503,
-			body:   `{"object":"error","error":{"type":"api_error","code":"service_unavailable","message":"search is unavailable"}}`,
+			body:   `{"error":{"type":"api_error","code":"service_unavailable","message":"search is unavailable"}}`,
 		},
 		{
 			name:   "500 is scrubbed to a bare internal error",
 			err:    apikit.E(http.StatusInternalServerError, apikit.CodeInternalError, `pq: relation "taxonomy_nodes" does not exist`),
 			status: 500,
-			body:   `{"object":"error","error":{"type":"api_error","code":"internal_error","message":"internal error"}}`,
+			body:   `{"error":{"type":"api_error","code":"internal_error","message":"internal error"}}`,
 		},
 		{
 			name:   "a plain error never reaches the wire",
 			err:    errors.New(`dial tcp 10.0.0.4:5432: connect: connection refused`),
 			status: 500,
-			body:   `{"object":"error","error":{"type":"api_error","code":"internal_error","message":"internal error"}}`,
+			body:   `{"error":{"type":"api_error","code":"internal_error","message":"internal error"}}`,
 		},
 		{
-			name:   "domain types survive: openrails card_error is not drift",
-			err:    apikit.E(http.StatusPaymentRequired, "insufficient_funds", "card declined").WithType("card_error"),
+			name:   "402 infers openrails' card_error, the one domain-flavoured status",
+			err:    apikit.E(http.StatusPaymentRequired, "insufficient_funds", "card declined"),
 			status: 402,
-			body:   `{"object":"error","error":{"type":"card_error","code":"insufficient_funds","message":"card declined"}}`,
+			body:   `{"error":{"type":"card_error","code":"insufficient_funds","message":"card declined"}}`,
 		},
 		{
-			name: "metadata and request id ride along",
+			name: "request id survives; unsafe metadata does not",
 			err: apikit.E(http.StatusConflict, apikit.CodeResourceConflict, "conflict").
 				WithMetadata(map[string]any{"constraint": "taxonomy_nodes_slug_key"}).
 				WithRequestID("req_123"),
 			status: 409,
-			body:   `{"object":"error","error":{"type":"conflict_error","code":"resource_conflict","message":"conflict","request_id":"req_123","metadata":{"constraint":"taxonomy_nodes_slug_key"}}}`,
+			body:   `{"error":{"type":"invalid_request_error","code":"resource_conflict","message":"conflict","request_id":"req_123"}}`,
+		},
+		{
+			name: "allowlisted metadata rides along",
+			err: apikit.E(http.StatusTooManyRequests, apikit.CodeRateLimitExceeded, "slow down").
+				WithMetadata(map[string]any{"retry_after": 30}),
+			status: 429,
+			body:   `{"error":{"type":"rate_limit_error","code":"rate_limit_exceeded","message":"slow down","metadata":{"retry_after":30}}}`,
+		},
+		{
+			name:   "a 500 keeps its request id so the log is still reachable",
+			err:    apikit.E(http.StatusInternalServerError, apikit.CodeInternalError, "boom").WithRequestID("req_500"),
+			status: 500,
+			body:   `{"error":{"type":"api_error","code":"internal_error","message":"internal error","request_id":"req_500"}}`,
 		},
 	}
 
@@ -126,14 +145,38 @@ func TestWriteErrorWire(t *testing.T) {
 
 // The absent code is load-bearing: doujins' SPA prefers error.code over
 // error.message when both are present, so a writer that invents a code would
-// silently replace every human message with a machine string.
+// silently replace every human message with a machine string
+// (compat/golden/parsers.json records exactly that).
 func TestCodeIsOmittedNotInvented(t *testing.T) {
 	_, _, body := serve(t, func(w http.ResponseWriter, r *http.Request) {
 		apikit.WriteError(w, apikit.E(http.StatusBadRequest, "", "limit must be a positive integer"))
 	})
-	want := `{"object":"error","error":{"type":"invalid_request_error","message":"limit must be a positive integer"}}` + "\n"
+	want := `{"error":{"type":"invalid_request_error","message":"limit must be a positive integer"}}` + "\n"
 	if body != want {
 		t.Errorf("got %s want %s", body, want)
+	}
+}
+
+// param is a *string in Go and omitempty on the wire: absent and empty are one
+// thing to a client, and "param":null is a thing nobody wants.
+func TestParamIsPointerAbsentWhenUnset(t *testing.T) {
+	var obj apikit.ErrorObject
+	if obj.Param != nil {
+		t.Fatal("zero ErrorObject must have a nil param")
+	}
+	e := apikit.E(400, apikit.CodeInvalidParam, "bad").WithParam("slug")
+	if got := e.Param(); got != "slug" {
+		t.Fatalf("Param() = %q", got)
+	}
+	if env := e.Envelope(); env.Error.Param == nil || *env.Error.Param != "slug" {
+		t.Fatalf("param pointer not set: %+v", env.Error.Param)
+	}
+	if env := e.WithParam("").Envelope(); env.Error.Param != nil {
+		t.Fatal("an empty param must be absent, never null")
+	}
+	b, _ := json.Marshal(apikit.NewEnvelope(apikit.ErrorObject{Type: apikit.TypeAPI, Message: "x"}))
+	if string(b) != `{"error":{"type":"api_error","message":"x"}}` {
+		t.Fatalf("absent param leaked: %s", b)
 	}
 }
 
@@ -141,14 +184,15 @@ func TestTypeForStatus(t *testing.T) {
 	cases := map[int]apikit.Type{
 		400: apikit.TypeInvalidRequest,
 		401: apikit.TypeAuthentication,
+		402: apikit.TypeCard,
 		403: apikit.TypeAuthorization,
-		404: apikit.TypeNotFound,
-		409: apikit.TypeConflict,
+		404: apikit.TypeInvalidRequest,
+		409: apikit.TypeInvalidRequest,
 		415: apikit.TypeInvalidRequest,
-		422: apikit.TypeInvalidRequest, // ambiguous: rejected must be explicit
+		422: apikit.TypeInvalidRequest,
 		429: apikit.TypeRateLimit,
 		500: apikit.TypeAPI,
-		501: apikit.TypeNotImplemented,
+		501: apikit.TypeAPI,
 		502: apikit.TypeAPI,
 		503: apikit.TypeAPI,
 	}
@@ -163,6 +207,7 @@ func TestCodeForStatus(t *testing.T) {
 	cases := map[int]apikit.Code{
 		400: apikit.CodeInvalidParam,
 		401: apikit.CodeAuthenticationRequired,
+		402: apikit.CodePaymentFailed,
 		403: apikit.CodeResourceAccessDenied,
 		404: apikit.CodeResourceNotFound,
 		409: apikit.CodeResourceConflict,
@@ -194,9 +239,9 @@ func TestErrorIsMatchesOnCode(t *testing.T) {
 	}
 }
 
-// The object discriminator is what hentai0's api-service branches on to tell an
-// error body from a success body; it must be present on every error.
-func TestEnvelopeAlwaysCarriesObjectDiscriminator(t *testing.T) {
+// The canonical envelope is the deployed authkit/openrails shape. The GinAPI
+// discriminator is available, and deliberately never applied by a writer.
+func TestCanonicalEnvelopeHasNoDiscriminator(t *testing.T) {
 	for _, env := range []apikit.Envelope{
 		apikit.NewEnvelope(apikit.ErrorObject{Message: "x"}),
 		func() apikit.Envelope { _, e := apikit.EnvelopeFor(errors.New("boom")); return e }(),
@@ -210,8 +255,15 @@ func TestEnvelopeAlwaysCarriesObjectDiscriminator(t *testing.T) {
 		if err := json.Unmarshal(b, &decoded); err != nil {
 			t.Fatal(err)
 		}
-		if decoded["object"] != "error" {
-			t.Errorf("object = %v, want error (body %s)", decoded["object"], b)
+		if _, ok := decoded["object"]; ok {
+			t.Errorf("canonical envelope must not carry object: %s", b)
 		}
+		if _, ok := decoded["error"]; !ok {
+			t.Errorf("canonical envelope must nest under error: %s", b)
+		}
+	}
+	compat, _ := json.Marshal(apikit.WithObject(apikit.NewEnvelope(apikit.ErrorObject{Type: apikit.TypeAPI, Message: "x"})))
+	if string(compat) != `{"object":"error","error":{"type":"api_error","message":"x"}}` {
+		t.Errorf("WithObject = %s", compat)
 	}
 }

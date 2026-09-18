@@ -2,6 +2,9 @@
 // gin.Context, binds list parameters from the query string, and carries the
 // locale middleware. The envelope vocabulary itself lives in apikit, which
 // depends on nothing.
+//
+// Every writer here is byte-for-byte identical to the root net/http writer for
+// the same error — gin_test.go asserts it off a real socket.
 package apikitgin
 
 import (
@@ -13,15 +16,17 @@ import (
 )
 
 // Fail writes err as the canonical envelope, deriving status and shape from it.
-func Fail(c *gin.Context, err error) {
-	status, env := apikit.EnvelopeFor(err)
-	c.JSON(status, env)
-}
+// It is apikit.WriteError against c.Writer — the same function, not a parallel
+// implementation, which is how byte-for-byte equivalence is guaranteed rather
+// than tested for.
+func Fail(c *gin.Context, err error) { apikit.WriteError(c.Writer, err) }
 
 // Send writes an explicit envelope. Code may be empty: an absent code means
 // "no machine reason beyond the status", and the writers never invent one.
+// param is a plain string — the wire's pointer is apikit's problem.
 func Send(c *gin.Context, status int, t apikit.Type, code apikit.Code, message, param string) {
-	c.JSON(status, apikit.NewEnvelope(apikit.ErrorObject{Type: t, Code: code, Message: message, Param: param}))
+	e := (&apikit.Error{Status: status, Type: t, Code: code, Message: message}).WithParam(param)
+	Fail(c, e)
 }
 
 func send(c *gin.Context, status int, code apikit.Code, message, param string) {
@@ -59,7 +64,9 @@ func ForbiddenWithMessage(c *gin.Context, message string) {
 	send(c, http.StatusForbidden, "", message, "")
 }
 
-// NotFound sends 404 not_found_error for a named entity.
+// NotFound sends 404 for a named entity. The transport type stays
+// invalid_request_error, as authkit and openrails deploy it; resource_not_found
+// is the code a client branches on.
 func NotFound(c *gin.Context, entity string) {
 	NotFoundWithMessage(c, fmt.Sprintf("%s not found", entity))
 }
@@ -69,19 +76,20 @@ func NotFoundWithMessage(c *gin.Context, message string) {
 	send(c, http.StatusNotFound, "", message, "")
 }
 
-// Conflict sends 409 conflict_error.
+// Conflict sends 409. The state conflict is in the code, not a transport type.
 func Conflict(c *gin.Context, message string) {
 	send(c, http.StatusConflict, "", message, "")
 }
 
-// Rejected sends 422 rejected_error: a policy refused the content. It is the
-// one 4xx category a status cannot imply, so it has its own writer.
-func Rejected(c *gin.Context, reason string) {
-	Send(c, http.StatusUnprocessableEntity, apikit.TypeRejected, apikit.CodeContentRejected, reason, "")
+// ModerationRejected sends 422 invalid_request_error with the stable code
+// moderation_rejected: transport classification is unchanged, and the code is
+// what tells a SPA to show the author a reason instead of retrying.
+func ModerationRejected(c *gin.Context, reason string) {
+	send(c, http.StatusUnprocessableEntity, apikit.CodeModerationRejected, reason, "")
 }
 
 // UnprocessableEntity sends 422 invalid_request_error: well-formed syntax the
-// server cannot act on. For a moderation refusal use Rejected.
+// server cannot act on. For a moderation refusal use ModerationRejected.
 func UnprocessableEntity(c *gin.Context, message string) {
 	send(c, http.StatusUnprocessableEntity, "", message, "")
 }
@@ -96,7 +104,8 @@ func TooManyRequests(c *gin.Context, message string) {
 	send(c, http.StatusTooManyRequests, "", message, "")
 }
 
-// InternalError sends 500 api_error.
+// InternalError sends 500 api_error. The message is scrubbed: 500 is the one
+// status that means "unexpected", so its text may carry an internal cause.
 func InternalError(c *gin.Context, message string) {
 	send(c, http.StatusInternalServerError, "", message, "")
 }
@@ -111,13 +120,15 @@ func ServiceUnavailable(c *gin.Context, message string) {
 	send(c, http.StatusServiceUnavailable, "", message, "")
 }
 
-// NotImplemented sends 501 not_implemented_error: this build lacks the capability.
+// NotImplemented sends 501 api_error with the stable code not_implemented:
+// this build lacks the capability. No new transport type — the code is the
+// signal to hide the feature rather than retry.
 func NotImplemented(c *gin.Context, message string) {
-	send(c, http.StatusNotImplemented, "", message, "")
+	send(c, http.StatusNotImplemented, apikit.CodeNotImplemented, message, "")
 }
 
-// NotConfigured sends 501 not_implemented_error for an optional capability the
-// operator never wired — a deployment gap, distinguishable from a crash.
+// NotConfigured sends 501 api_error for an optional capability the operator
+// never wired — a deployment gap, distinguishable from a crash by its code.
 func NotConfigured(c *gin.Context, message string) {
 	send(c, http.StatusNotImplemented, apikit.CodeNotConfigured, message, "")
 }
