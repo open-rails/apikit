@@ -3,6 +3,15 @@
 // that go with them. It depends on nothing outside the standard library, so
 // every library in the fleet can speak it. Framework bindings live in
 // sub-modules (adapters/gin).
+//
+// The canonical body is the shape AuthKit and OpenRails deploy today:
+//
+//	{"error":{"type":"...","code":"...","message":"...","param":"...","request_id":"...","metadata":{}}}
+//
+// GinAPI wraps that in a top-level "object":"error" discriminator. That is a
+// COMPATIBILITY DIFFERENCE, not the canonical form: see CompatEnvelope, and
+// compat/DECISION-object-discriminator.md for the evidence and the open
+// decision. Nothing here emits the discriminator on its own.
 package apikit
 
 import (
@@ -11,41 +20,37 @@ import (
 	"net/http"
 )
 
-// Type is the transport-level category of a failure. The constants below are
-// the standard set every service shares; Type is an open string so a domain
-// may add its own (openrails' card_error is a legitimate extension, not drift).
+// Type is the transport-level category of a failure: what a client does next.
+// The constants are the ones AuthKit and OpenRails already put on the wire.
+// Type is an open string so a domain may add its own.
 //
-// The rule for adding one: a Type exists when a client must take a DIFFERENT
-// ACTION. Anything that only explains a failure belongs in Code.
+// Adding a transport type is a wire migration for every parser in the fleet.
+// A failure that only needs explaining gets a Code instead — that is the field
+// a SPA branches on.
 type Type string
 
 const (
-	// TypeInvalidRequest: fix the input, then retry. 400 and unclassified 4xx.
+	// TypeInvalidRequest: fix the input, then retry. 400, and every other
+	// unclassified 4xx — including 404, 409, 415 and 422. Both deployed
+	// writers map them here; the reason lives in Code.
 	TypeInvalidRequest Type = "invalid_request_error"
 	// TypeAuthentication: authenticate or refresh, then retry. 401.
 	TypeAuthentication Type = "authentication_error"
 	// TypeAuthorization: never retry as this principal. 403.
 	TypeAuthorization Type = "authorization_error"
-	// TypeNotFound: render an absent/gone state. 404.
-	TypeNotFound Type = "not_found_error"
-	// TypeConflict: reload current state, reconcile, retry. 409.
-	TypeConflict Type = "conflict_error"
-	// TypeRejected: a policy refused the content; show the reason, never retry
-	// unchanged. 422, and never inferred — see TypeForStatus.
-	TypeRejected Type = "rejected_error"
 	// TypeRateLimit: back off and retry later. 429.
 	TypeRateLimit Type = "rate_limit_error"
-	// TypeNotImplemented: the capability is absent from this deployment; hide
-	// the feature, never retry. 501.
-	TypeNotImplemented Type = "not_implemented_error"
-	// TypeAPI: the server failed; retry with backoff. 5xx other than 501.
+	// TypeAPI: the server failed or lacks the capability. 5xx, 501 included.
 	TypeAPI Type = "api_error"
+	// TypeCard is OpenRails' domain extension for 402: collect a new payment
+	// method. It is inferred only for 402, which no other fleet service uses.
+	TypeCard Type = "card_error"
 )
 
-// Code is a stable, machine-readable reason. The constants below are the
-// transport-level codes shared across services; each library keeps its own
-// domain catalog (authkit's hundreds of auth codes, openrails' decline codes)
-// and emits those in the same field.
+// Code is the stable, machine-readable reason, and the field a client branches
+// on. Transport-level codes are below; each library keeps its own domain
+// catalog (AuthKit's hundreds of auth codes, OpenRails' decline codes) and
+// emits those in the same field.
 type Code string
 
 const (
@@ -63,65 +68,83 @@ const (
 
 	CodeRateLimitExceeded Code = "rate_limit_exceeded"
 
-	// CodeContentRejected is a moderation/policy refusal of submitted content.
-	CodeContentRejected Code = "content_rejected"
-	// CodeNotConfigured is an optional capability the operator never wired —
-	// a deployment gap, not a crash.
+	// CodeModerationRejected is a moderation/policy refusal of submitted
+	// content: 422 under TypeInvalidRequest. The transport category says
+	// "the request was not acted on"; this code says why, and is what a SPA
+	// branches on to show the author a reason instead of a retry.
+	CodeModerationRejected Code = "moderation_rejected"
+	// CodeNotConfigured is an optional capability the operator never wired.
 	CodeNotConfigured Code = "not_configured"
-	// CodeNotImplemented is a capability this build does not have at all.
+	// CodeNotImplemented is a capability this build does not have: 501 under
+	// TypeAPI. Same transport handling as any 5xx; the code is what tells the
+	// client to hide the feature rather than retry.
 	CodeNotImplemented Code = "not_implemented"
 
+	CodePaymentFailed      Code = "payment_failed"
 	CodeInternalError      Code = "internal_error"
 	CodeServiceUnavailable Code = "service_unavailable"
 )
 
 // ErrorObject is the error detail carried under the envelope's "error" key.
+// Param is a pointer so "absent" and "empty" stay distinguishable in Go; on
+// the wire omitempty makes it identical to AuthKit's and OpenRails' shape.
+// Callers never build the pointer — the constructors take a plain string.
 type ErrorObject struct {
 	Type      Type           `json:"type"`
 	Code      Code           `json:"code,omitempty"`
 	Message   string         `json:"message"`
-	Param     string         `json:"param,omitempty"`
+	Param     *string        `json:"param,omitempty"`
 	RequestID string         `json:"request_id,omitempty"`
 	Metadata  map[string]any `json:"metadata,omitempty"`
 }
 
-// Envelope is the whole error body: {"object":"error","error":{...}}.
-// The object discriminator lets a client tell an error body from a success
-// body without consulting the status.
+// Envelope is the canonical error body: {"error":{...}}.
 type Envelope struct {
+	Error ErrorObject `json:"error"`
+}
+
+// CompatEnvelope is Envelope plus GinAPI's top-level discriminator. It exists
+// so a host that must keep the discriminator can, and so both candidate bodies
+// can be shown side by side. Nothing in apikit emits it by default: whether
+// the discriminator belongs in the canonical envelope is an open owner
+// decision (compat/DECISION-object-discriminator.md).
+type CompatEnvelope struct {
 	Object string      `json:"object"` // always "error"
 	Error  ErrorObject `json:"error"`
 }
 
-// NewEnvelope builds an envelope with the object discriminator set.
+// WithObject renders env in the GinAPI-compatible shape.
+func WithObject(env Envelope) CompatEnvelope {
+	return CompatEnvelope{Object: "error", Error: env.Error}
+}
+
+// NewEnvelope builds the canonical envelope, defaulting the type and
+// sanitizing metadata. Every path to the wire goes through it.
 func NewEnvelope(obj ErrorObject) Envelope {
 	if obj.Type == "" {
 		obj.Type = TypeAPI
 	}
-	if len(obj.Metadata) == 0 {
-		obj.Metadata = nil
+	if obj.Param != nil && *obj.Param == "" {
+		obj.Param = nil
 	}
-	return Envelope{Object: "error", Error: obj}
+	obj.Metadata = SanitizeMetadata(obj.Metadata)
+	return Envelope{Error: obj}
 }
 
-// TypeForStatus is the category an HTTP status determines on its own.
-// It infers ONLY where the status is unambiguous: 422 could be a malformed
-// entity or a policy rejection, so it yields TypeInvalidRequest and a caller
-// that means TypeRejected must say so.
+// TypeForStatus is the transport category an HTTP status determines, matching
+// what AuthKit and OpenRails deploy today. 404, 409, 415 and 422 are
+// deliberately TypeInvalidRequest: both writers already map them there, and
+// splitting them out is a wire migration, not a bug fix.
 func TypeForStatus(status int) Type {
 	switch status {
 	case http.StatusUnauthorized:
 		return TypeAuthentication
 	case http.StatusForbidden:
 		return TypeAuthorization
-	case http.StatusNotFound:
-		return TypeNotFound
-	case http.StatusConflict:
-		return TypeConflict
+	case http.StatusPaymentRequired:
+		return TypeCard
 	case http.StatusTooManyRequests:
 		return TypeRateLimit
-	case http.StatusNotImplemented:
-		return TypeNotImplemented
 	}
 	if status >= 500 {
 		return TypeAPI
@@ -129,16 +152,20 @@ func TypeForStatus(status int) Type {
 	return TypeInvalidRequest
 }
 
-// CodeForStatus is the default code for a status. Writers do NOT apply it:
-// an absent code means "no machine reason beyond the status", and filling one
-// in silently would change what clients that prefer code over message display.
-// Call it explicitly when you want a code on every error.
+// CodeForStatus is the default code for a status, matching OpenRails'
+// inferErrorTypeAndCode. Root writers do NOT apply it: an absent code means
+// "no machine reason beyond the status", and filling one in is wire-visible —
+// Doujins' client displays code in preference to message, so an invented code
+// replaces a human sentence with a machine string (compat/golden/parsers.json).
+// OpenRails calls it explicitly because its writers have always emitted a code.
 func CodeForStatus(status int) Code {
 	switch status {
 	case http.StatusUnauthorized:
 		return CodeAuthenticationRequired
 	case http.StatusForbidden:
 		return CodeResourceAccessDenied
+	case http.StatusPaymentRequired:
+		return CodePaymentFailed
 	case http.StatusNotFound:
 		return CodeResourceNotFound
 	case http.StatusConflict:
@@ -164,10 +191,10 @@ type Error struct {
 	Type      Type
 	Code      Code
 	Message   string
-	Param     string
 	RequestID string
 	Metadata  map[string]any
 
+	param *string
 	cause error
 }
 
@@ -192,17 +219,42 @@ func (e *Error) Is(target error) bool {
 	return ok && t.Code != "" && t.Code == e.Code
 }
 
-func (e *Error) WithCause(cause error) *Error   { e.cause = cause; return e }
-func (e *Error) WithParam(param string) *Error  { e.Param = param; return e }
-func (e *Error) WithType(t Type) *Error         { e.Type = t; return e }
+// Param is the offending request field, or "" when none was named.
+func (e *Error) Param() string {
+	if e.param == nil {
+		return ""
+	}
+	return *e.param
+}
+
+func (e *Error) WithCause(cause error) *Error { e.cause = cause; return e }
+func (e *Error) WithType(t Type) *Error       { e.Type = t; return e }
+
+// WithParam names the offending field. It takes a plain string; the pointer
+// the wire needs is this package's problem, not the caller's.
+func (e *Error) WithParam(param string) *Error {
+	if param == "" {
+		e.param = nil
+		return e
+	}
+	p := param
+	e.param = &p
+	return e
+}
+
 func (e *Error) WithRequestID(id string) *Error { e.RequestID = id; return e }
+
+// WithMetadata merges public metadata. It sanitizes on the way in, so an
+// unsafe value never reaches the struct, let alone the wire.
 func (e *Error) WithMetadata(m map[string]any) *Error {
-	if e.Metadata == nil {
-		e.Metadata = map[string]any{}
+	merged := map[string]any{}
+	for k, v := range e.Metadata {
+		merged[k] = v
 	}
 	for k, v := range m {
-		e.Metadata[k] = v
+		merged[k] = v
 	}
+	e.Metadata = SanitizeMetadata(merged)
 	return e
 }
 
@@ -212,7 +264,7 @@ func (e *Error) Envelope() Envelope {
 		Type:      e.Type,
 		Code:      e.Code,
 		Message:   e.Message,
-		Param:     e.Param,
+		Param:     e.param,
 		RequestID: e.RequestID,
 		Metadata:  e.Metadata,
 	})
@@ -228,8 +280,9 @@ func AsError(err error) *Error {
 }
 
 // EnvelopeFor derives the wire status and envelope for any error. An error
-// that is not an *Error — and any 5xx — is rendered as a bare internal error,
-// so an internal message never reaches the wire.
+// that is not an *Error — and any 500 — is rendered as a bare internal error,
+// so an internal message never reaches the wire. 501, 502 and 503 state a
+// deliberate operational condition and keep theirs.
 func EnvelopeFor(err error) (int, Envelope) {
 	e := AsError(err)
 	if e == nil {
@@ -239,9 +292,6 @@ func EnvelopeFor(err error) (int, Envelope) {
 	if status == 0 {
 		status = http.StatusInternalServerError
 	}
-	// 500 alone is scrubbed: it is the one status that means "unexpected", so
-	// its message may carry an internal cause. 501/502/503 state a deliberate
-	// operational condition and keep theirs.
 	if status == http.StatusInternalServerError {
 		return status, NewEnvelope(ErrorObject{Type: TypeAPI, Code: CodeInternalError, Message: "internal error", RequestID: e.RequestID})
 	}

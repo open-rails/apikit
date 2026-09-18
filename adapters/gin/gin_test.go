@@ -31,6 +31,10 @@ func call(t *testing.T, target string, h gin.HandlerFunc) (int, string) {
 	return resp.StatusCode, string(body)
 }
 
+// Each case is a writer, the status it must send, and the exact bytes. The
+// bytes are the canonical apikit envelope: no top-level discriminator,
+// application/json with no charset parameter, one trailing newline — the same
+// bytes the root net/http writer emits, because it IS the root writer.
 func TestErrorWriters(t *testing.T) {
 	cases := []struct {
 		name   string
@@ -39,51 +43,51 @@ func TestErrorWriters(t *testing.T) {
 		body   string
 	}{
 		{"BadRequest", func(c *gin.Context) { apikitgin.BadRequest(c, "bad") }, 400,
-			`{"object":"error","error":{"type":"invalid_request_error","message":"bad"}}`},
+			`{"error":{"type":"invalid_request_error","message":"bad"}}`},
 		{"BadRequestWithCode", func(c *gin.Context) { apikitgin.BadRequestWithCode(c, apikit.CodeInvalidFormat, "bad") }, 400,
-			`{"object":"error","error":{"type":"invalid_request_error","code":"invalid_format","message":"bad"}}`},
+			`{"error":{"type":"invalid_request_error","code":"invalid_format","message":"bad"}}`},
 		{"BadRequestParam", func(c *gin.Context) { apikitgin.BadRequestParam(c, "limit", "must be positive") }, 400,
-			`{"object":"error","error":{"type":"invalid_request_error","message":"must be positive","param":"limit"}}`},
+			`{"error":{"type":"invalid_request_error","message":"must be positive","param":"limit"}}`},
 		{"Unauthorized", apikitgin.Unauthorized, 401,
-			`{"object":"error","error":{"type":"authentication_error","message":"unauthorized"}}`},
+			`{"error":{"type":"authentication_error","message":"unauthorized"}}`},
 		{"UnauthorizedWithMessage", func(c *gin.Context) { apikitgin.UnauthorizedWithMessage(c, "token expired") }, 401,
-			`{"object":"error","error":{"type":"authentication_error","message":"token expired"}}`},
+			`{"error":{"type":"authentication_error","message":"token expired"}}`},
 		{"Forbidden", apikitgin.Forbidden, 403,
-			`{"object":"error","error":{"type":"authorization_error","message":"forbidden"}}`},
+			`{"error":{"type":"authorization_error","message":"forbidden"}}`},
 		{"ForbiddenWithMessage", func(c *gin.Context) { apikitgin.ForbiddenWithMessage(c, "not yours") }, 403,
-			`{"object":"error","error":{"type":"authorization_error","message":"not yours"}}`},
+			`{"error":{"type":"authorization_error","message":"not yours"}}`},
 		{"NotFound", func(c *gin.Context) { apikitgin.NotFound(c, "gallery") }, 404,
-			`{"object":"error","error":{"type":"not_found_error","message":"gallery not found"}}`},
+			`{"error":{"type":"invalid_request_error","message":"gallery not found"}}`},
 		{"NotFoundWithMessage", func(c *gin.Context) { apikitgin.NotFoundWithMessage(c, "gone") }, 404,
-			`{"object":"error","error":{"type":"not_found_error","message":"gone"}}`},
+			`{"error":{"type":"invalid_request_error","message":"gone"}}`},
 		{"Conflict", func(c *gin.Context) { apikitgin.Conflict(c, "taken") }, 409,
-			`{"object":"error","error":{"type":"conflict_error","message":"taken"}}`},
+			`{"error":{"type":"invalid_request_error","message":"taken"}}`},
 		{"UnsupportedMediaType", func(c *gin.Context) { apikitgin.UnsupportedMediaType(c, "send json") }, 415,
-			`{"object":"error","error":{"type":"invalid_request_error","message":"send json"}}`},
+			`{"error":{"type":"invalid_request_error","message":"send json"}}`},
 		{"UnprocessableEntity", func(c *gin.Context) { apikitgin.UnprocessableEntity(c, "empty chapter") }, 422,
-			`{"object":"error","error":{"type":"invalid_request_error","message":"empty chapter"}}`},
-		{"Rejected", func(c *gin.Context) { apikitgin.Rejected(c, "policy: minors") }, 422,
-			`{"object":"error","error":{"type":"rejected_error","code":"content_rejected","message":"policy: minors"}}`},
+			`{"error":{"type":"invalid_request_error","message":"empty chapter"}}`},
+		{"ModerationRejected", func(c *gin.Context) { apikitgin.ModerationRejected(c, "policy: minors") }, 422,
+			`{"error":{"type":"invalid_request_error","code":"moderation_rejected","message":"policy: minors"}}`},
 		{"TooManyRequests", func(c *gin.Context) { apikitgin.TooManyRequests(c, "slow down") }, 429,
-			`{"object":"error","error":{"type":"rate_limit_error","message":"slow down"}}`},
-		{"InternalError", func(c *gin.Context) { apikitgin.InternalError(c, "boom") }, 500,
-			`{"object":"error","error":{"type":"api_error","message":"boom"}}`},
+			`{"error":{"type":"rate_limit_error","message":"slow down"}}`},
+		{"InternalError", func(c *gin.Context) { apikitgin.InternalError(c, `pq: relation "x" does not exist`) }, 500,
+			`{"error":{"type":"api_error","code":"internal_error","message":"internal error"}}`},
 		{"NotImplemented", func(c *gin.Context) { apikitgin.NotImplemented(c, "not built") }, 501,
-			`{"object":"error","error":{"type":"not_implemented_error","message":"not built"}}`},
+			`{"error":{"type":"api_error","code":"not_implemented","message":"not built"}}`},
 		{"NotConfigured", func(c *gin.Context) { apikitgin.NotConfigured(c, "no MediaStore configured") }, 501,
-			`{"object":"error","error":{"type":"not_implemented_error","code":"not_configured","message":"no MediaStore configured"}}`},
+			`{"error":{"type":"api_error","code":"not_configured","message":"no MediaStore configured"}}`},
 		{"BadGateway", func(c *gin.Context) { apikitgin.BadGateway(c, "upstream down") }, 502,
-			`{"object":"error","error":{"type":"api_error","message":"upstream down"}}`},
+			`{"error":{"type":"api_error","message":"upstream down"}}`},
 		{"ServiceUnavailable", func(c *gin.Context) { apikitgin.ServiceUnavailable(c, "maintenance") }, 503,
-			`{"object":"error","error":{"type":"api_error","message":"maintenance"}}`},
+			`{"error":{"type":"api_error","message":"maintenance"}}`},
 		{"Fail renders an apikit.Error", func(c *gin.Context) {
 			apikitgin.Fail(c, apikit.E(http.StatusNotFound, apikit.CodeResourceNotFound, "no such artist"))
 		}, 404,
-			`{"object":"error","error":{"type":"not_found_error","code":"resource_not_found","message":"no such artist"}}`},
+			`{"error":{"type":"invalid_request_error","code":"resource_not_found","message":"no such artist"}}`},
 		{"Fail scrubs an unexpected error", func(c *gin.Context) {
 			apikitgin.Fail(c, io.ErrUnexpectedEOF)
 		}, 500,
-			`{"object":"error","error":{"type":"api_error","code":"internal_error","message":"internal error"}}`},
+			`{"error":{"type":"api_error","code":"internal_error","message":"internal error"}}`},
 	}
 
 	for _, tc := range cases {
@@ -92,11 +96,75 @@ func TestErrorWriters(t *testing.T) {
 			if status != tc.status {
 				t.Errorf("status = %d, want %d", status, tc.status)
 			}
-			if body != tc.body {
+			if body != tc.body+"\n" {
 				t.Errorf("wire body mismatch\n got: %s\nwant: %s", body, tc.body)
 			}
 		})
 	}
+}
+
+// The adapter must not become a second implementation of the envelope. Every
+// writer is driven through both surfaces and the bytes are compared.
+func TestGinWritersAreByteIdenticalToNetHTTP(t *testing.T) {
+	cases := []struct {
+		name string
+		gin  gin.HandlerFunc
+		err  error
+	}{
+		{"400", func(c *gin.Context) { apikitgin.BadRequestParam(c, "limit", "must be positive") },
+			apikit.E(http.StatusBadRequest, "", "must be positive").WithParam("limit")},
+		{"401", apikitgin.Unauthorized, apikit.E(http.StatusUnauthorized, "", "unauthorized")},
+		{"403", apikitgin.Forbidden, apikit.E(http.StatusForbidden, "", "forbidden")},
+		{"404", func(c *gin.Context) { apikitgin.NotFound(c, "gallery") }, apikit.E(http.StatusNotFound, "", "gallery not found")},
+		{"409", func(c *gin.Context) { apikitgin.Conflict(c, "taken") }, apikit.E(http.StatusConflict, "", "taken")},
+		{"422", func(c *gin.Context) { apikitgin.ModerationRejected(c, "policy") },
+			apikit.E(http.StatusUnprocessableEntity, apikit.CodeModerationRejected, "policy")},
+		{"429", func(c *gin.Context) { apikitgin.TooManyRequests(c, "slow down") }, apikit.E(http.StatusTooManyRequests, "", "slow down")},
+		{"500", func(c *gin.Context) { apikitgin.InternalError(c, "boom") }, apikit.E(http.StatusInternalServerError, "", "boom")},
+		{"501", func(c *gin.Context) { apikitgin.NotImplemented(c, "not built") },
+			apikit.E(http.StatusNotImplemented, apikit.CodeNotImplemented, "not built")},
+		{"503", func(c *gin.Context) { apikitgin.ServiceUnavailable(c, "maintenance") }, apikit.E(http.StatusServiceUnavailable, "", "maintenance")},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			ginStatus, ginBody, ginType := callFull(t, tc.gin)
+			plainStatus, plainBody, plainType := plain(t, func(w http.ResponseWriter, _ *http.Request) { apikit.WriteError(w, tc.err) })
+			if ginStatus != plainStatus || ginBody != plainBody || ginType != plainType {
+				t.Errorf("gin and net/http disagree\n gin: %d %s %q\nhttp: %d %s %q",
+					ginStatus, ginType, ginBody, plainStatus, plainType, plainBody)
+			}
+		})
+	}
+}
+
+func callFull(t *testing.T, h gin.HandlerFunc) (int, string, string) {
+	t.Helper()
+	r := gin.New()
+	r.GET("/x", h)
+	return request(t, r)
+}
+
+func plain(t *testing.T, h http.HandlerFunc) (int, string, string) {
+	t.Helper()
+	mux := http.NewServeMux()
+	mux.Handle("/x", h)
+	return request(t, mux)
+}
+
+func request(t *testing.T, h http.Handler) (int, string, string) {
+	t.Helper()
+	srv := httptest.NewServer(h)
+	t.Cleanup(srv.Close)
+	resp, err := http.Get(srv.URL + "/x")
+	if err != nil {
+		t.Fatalf("get: %v", err)
+	}
+	defer resp.Body.Close()
+	body, err := io.ReadAll(resp.Body)
+	if err != nil {
+		t.Fatalf("read: %v", err)
+	}
+	return resp.StatusCode, string(body), resp.Header.Get("Content-Type")
 }
 
 func TestSuccessWriters(t *testing.T) {
