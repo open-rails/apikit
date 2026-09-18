@@ -46,7 +46,7 @@ require (
 )
 
 require (
-	github.com/open-rails/apikit v0.6.0
+	github.com/open-rails/apikit v0.7.0
 	github.com/open-rails/apikit/adapters/gin v0.0.0
 )
 
